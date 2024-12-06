@@ -11,12 +11,11 @@ import (
 )
 
 type Token struct {
-	Raw       string
-	Method    int // 256 (sha256 пока так (
-	Header    map[string]interface{}
-	Payload   map[string]interface{}
-	Signature string
-	//Valid     bool
+	Raw       string                 `json:"raw"`
+	Method    int                    `json:"method"`
+	Header    map[string]interface{} `json:"header"`
+	Payload   map[string]interface{} `json:"payload"`
+	Signature string                 `json:"signature"`
 }
 
 func base64urlEncode(data []byte) string {
@@ -47,11 +46,8 @@ func createSignature(secret, data string) string { //data уже должны б
 	return base64urlEncode(h.Sum(nil))
 }
 
-func verifySignature(secret, token string) bool {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return false
-	}
+func (token *Token) VerifySignature(secret string) bool {
+	parts := strings.Split(token.Raw, ".")
 	message := parts[0] + "." + parts[1]
 	expectedSignature := createSignature(secret, message)
 	return parts[2] == expectedSignature
@@ -62,7 +58,7 @@ func NewToken(header map[string]interface{}, payload map[string]interface{}, key
 	payloadJSON, _ := json.Marshal(payload)
 	parts := base64urlEncode(headerJSON) + "." + base64urlEncode(payloadJSON)
 	signature := createSignature(key, parts)
-	parts += signature
+	parts += "." + signature
 	return &Token{
 		Raw:       parts,
 		Method:    256,
@@ -73,7 +69,9 @@ func NewToken(header map[string]interface{}, payload map[string]interface{}, key
 }
 
 func (token *Token) SendToken(w http.ResponseWriter) {
-	w.Write([]byte(token.Raw))
+	tokenJSON, _ := json.Marshal(&token)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(tokenJSON)
 }
 
 func GetToken(r *http.Request) (*Token, error) {
@@ -87,7 +85,7 @@ func GetToken(r *http.Request) (*Token, error) {
 	}
 	headerJSON, err := base64urlDecode(parts[0])
 	if err != nil {
-		return nil, errors.New("err decode header")
+		return nil, errors.New("err decode header") //без bearer
 	}
 
 	var header map[string]interface{}
@@ -114,4 +112,8 @@ func GetToken(r *http.Request) (*Token, error) {
 	}
 
 	return token, nil
+}
+
+func (token *Token) VerifyToken(f func(payload map[string]interface{}) bool, key string) bool {
+	return f(token.Payload) && token.VerifySignature(key)
 }
