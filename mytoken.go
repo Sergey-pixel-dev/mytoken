@@ -40,7 +40,7 @@ func base64urlDecode(encoded string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(decoded)
 }
 
-func createSignature(secret, data string) string { //data уже должны быть разделены '.'
+func createSignature(secret, data string) string {
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte(data))
 	return base64urlEncode(h.Sum(nil))
@@ -48,72 +48,103 @@ func createSignature(secret, data string) string { //data уже должны б
 
 func (token *Token) VerifySignature(secret string) bool {
 	parts := strings.Split(token.Raw, ".")
+	if len(parts) != 3 {
+		return false
+	}
 	message := parts[0] + "." + parts[1]
 	expectedSignature := createSignature(secret, message)
-	return parts[2] == expectedSignature
+	return hmac.Equal([]byte(parts[2]), []byte(expectedSignature))
 }
 
-func NewToken(header map[string]interface{}, payload map[string]interface{}, key string) *Token {
-	headerJSON, _ := json.Marshal(header)
-	payloadJSON, _ := json.Marshal(payload)
+func NewToken(header map[string]interface{}, payload map[string]interface{}, key string) (*Token, error) {
+	headerJSON, err := json.Marshal(header)
+	if err != nil {
+		return nil, errors.New("не удалось сериализовать заголовок")
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, errors.New("не удалось сериализовать полезную нагрузку")
+	}
+
 	parts := base64urlEncode(headerJSON) + "." + base64urlEncode(payloadJSON)
 	signature := createSignature(key, parts)
 	parts += "." + signature
+
 	return &Token{
 		Raw:       parts,
 		Method:    256,
 		Header:    header,
 		Payload:   payload,
 		Signature: signature,
+	}, nil
+}
+
+func (token *Token) SendToken(w http.ResponseWriter) error {
+	tokenJSON, err := json.Marshal(envelope{"access_token": token.Raw})
+	if err != nil {
+		return errors.New("не удалось сериализовать токен")
 	}
-}
-
-func (token *Token) SendToken(w http.ResponseWriter) {
-	tokenJSON, _ := json.Marshal(&token)
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(tokenJSON)
+	_, err = w.Write(tokenJSON)
+	return err
 }
 
-func GetToken(r *http.Request) (*Token, error) {
-	rawToken := r.Header.Get("Authorization")
+func GetToken(rawToken string) (*Token, error) {
 	if rawToken == "" {
-		return nil, errors.New("no token")
+		return nil, errors.New("токен не указан")
 	}
 	parts := strings.Split(rawToken, ".")
 	if len(parts) != 3 {
-		return nil, errors.New("incorrect token")
+		return nil, errors.New("некорректный токен")
 	}
+
 	headerJSON, err := base64urlDecode(parts[0])
 	if err != nil {
-		return nil, errors.New("err decode header") //без bearer
+		return nil, errors.New("ошибка декодирования заголовка")
 	}
 
 	var header map[string]interface{}
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
-		return nil, errors.New("err unmarshal header")
+		return nil, errors.New("ошибка десериализации заголовка")
 	}
 
 	payloadJSON, err := base64urlDecode(parts[1])
 	if err != nil {
-		return nil, errors.New("err decode payload")
+		return nil, errors.New("ошибка декодирования полезной нагрузки")
 	}
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-		return nil, errors.New("err unmarshal upload")
+		return nil, errors.New("ошибка десериализации полезной нагрузки")
 	}
+
 	signature := parts[2]
-	token := &Token{
+	return &Token{
 		Raw:       rawToken,
 		Method:    256,
 		Header:    header,
 		Payload:   payload,
 		Signature: signature,
-	}
-
-	return token, nil
+	}, nil
 }
 
 func (token *Token) VerifyToken(f func(payload map[string]interface{}) bool, key string) bool {
-	return f(token.Payload) && token.VerifySignature(key)
+	return token.VerifySignature(key) && f(token.Payload)
+}
+
+func (token *Token) SendCookieToken(name, path string, w http.ResponseWriter) {
+	cookie := &http.Cookie{
+		Name:     name,
+		Value:    token.Raw,
+		Path:     path,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	}
+	http.SetCookie(w, cookie)
+}
+
+func GetCookieToken(cookie *http.Cookie) (*Token, error) {
+	return GetToken(cookie.Value)
 }
